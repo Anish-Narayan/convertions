@@ -1,50 +1,84 @@
-# SQL Pod Cross-Pollination Tool
+# SQL Pod Cross-Pollination Tool - run it in this order
 
-## Layout
-| File | Role |
+Converts SQL written for **Pod A** into the equivalent for **Pod B** using table/column mappings.
+Two parts: **Component A** (analysis -> builds the mapping workbook) and **Component B** (GUI converter, packaged as .exe).
+
+## Files
+| File | Purpose |
 |---|---|
-| `sql_common.py` | dialect, legacy `split_concepts`, `SchemaRegistry` (`$(x)` <-> `tempN`), table-name matching |
-| `sql_resolver.py` | SQLGlot scope-based table/column resolution (shared by A and B), legacy `fingerprint` |
-| `column_matching.py` | name-based column candidates (exact / case / normalised / fuzzy) |
-| `mapping_book.py` | read/write the Excel mapping workbook (openpyxl) |
-| `analysis_engine.py` | **Component A** (CLI) |
-| `converter.py`, `converter_gui.py` | **Component B** engine + Tkinter GUI (the .exe) |
-| `tests/` | `test_pure.py` (runs anywhere), `test_conversion.py` (needs sqlglot) |
+| `analysis_engine.py` | **Component A** command-line analyser |
+| `converter_gui.py` | **Component B** GUI (entry point for the .exe) |
+| `converter.py` | conversion engine used by the GUI |
+| `sql_resolver.py` | SQLGlot-based table/column/alias/CTE resolution (used by A and B) |
+| `sql_common.py` | dialect, concept splitting, `$(schema)` <-> `tempN` registry, name matching |
+| `column_matching.py` | name-based column candidate matching |
+| `mapping_book.py` | read/write the Excel mapping workbook |
+| `requirements-analysis.txt` / `requirements-converter.txt` | dependencies |
+| `build_exe.bat` | builds `SQLConverter.exe` (Windows) |
+| `tests/` | `test_pure.py` (no SQLGlot needed), `test_conversion.py` (needs SQLGlot) |
+| `examples/` | sample SQL files, table mapping, synonyms, test input |
 
-## Install and test
+## Step 1 - Install (Python 3.10+)
 ```
-python -m venv .venv && .venv\Scripts\activate        (Linux/macOS: source .venv/bin/activate)
+python -m venv .venv
+.venv\Scripts\activate            (Linux/macOS: source .venv/bin/activate)
 pip install -r requirements-analysis.txt
+```
+
+## Step 2 - Run the tests
+```
 python -m unittest discover tests -v
 ```
+The conversion tests were not run by the author (no SQLGlot in the build sandbox). If one fails, report the message.
 
-## Component A
+## Step 3 - Prepare the inputs for Component A
+1. `source.sql`, `target.sql`: one concept per pod. Optional `--concept_name` header lines split a file into concepts.
+2. `table_mapping.xlsx`: row 1 = pod labels (A1 = source pod, B1 = target pod); then `source_table | target_table`.
+   Write schema placeholders exactly as in the SQL, e.g. `$(gold.schema).claims`.
+
+## Step 4 - Run the analysis (Component A)
 ```
-python analysis_engine.py source.sql target.sql table_mapping.xlsx --out analysis_out
-   [--synonyms synonyms.json] [--abbreviations abbr.json] [--min-score 0.5] [--no-similarity]
+python analysis_engine.py examples/source_podA.sql examples/target_podB.sql examples/table_mapping.xlsx --out analysis_out --synonyms examples/synonyms.json
 ```
-`table_mapping.xlsx`: row 1 = pod labels (A1 = source pod, B1 = target pod), then `source_table | target_table`.
-Write schema placeholders in the Excel exactly as in the SQL, e.g. `$(gold.schema).claims`.
+Drop `--synonyms` to use pure name similarity. Other options: `--abbreviations abbr.json`, `--min-score 0.5`, `--no-similarity`.
 
-Outputs in `--out`: `source_metadata.json`, `target_metadata.json`, `mapping_review.xlsx` (TableMapping, ColumnMapping,
-Log, StructuralSimilarity), `pod_mapping.xlsx` (reusable), `analysis_log.txt`, `source.temp.sql`, `target.temp.sql`,
-`schema_map.json`. Originals are never touched.
+Outputs in `analysis_out/`:
+- `pod_mapping.xlsx` - **reusable mapping workbook** (Tables, Columns, Schemas sheets)
+- `mapping_review.xlsx` - TableMapping, ColumnMapping (all candidates + confidence), Log, StructuralSimilarity
+- `source_metadata.json`, `target_metadata.json`, `analysis_log.txt`
+- `source.temp.sql`, `target.temp.sql`, `schema_map.json` (temporary copies; originals untouched)
 
-**Review step:** in `pod_mapping.xlsx` > `Columns`, change `status` to `confirmed` for candidates you accept (and
-delete the rejected alternatives). The converter applies **only `confirmed`** rows. Only identical column names are
-auto-confirmed. Fill the optional `Schemas` sheet (pod-A placeholder -> pod-B placeholder) to remap schemas.
-Synonyms such as member/beneficiary are never assumed; supply them with `--synonyms` if you want them considered.
+## Step 5 - Review and confirm mappings (manual, important)
+Open `analysis_out/pod_mapping.xlsx` -> sheet **Columns**.
+- Only identical column names are auto-`confirmed`.
+- Change `status` to `confirmed` for suggestions you accept; delete rejected alternatives.
+- `ambiguous` / `unmapped` rows are never applied. Name similarity is not proof of equal meaning.
+- Optional: sheet **Schemas** - pod-A placeholder in column A, pod-B placeholder in column B (e.g. `$(gold.schema)` -> `$(silver.schema)`).
 
-## Component B (GUI)
+## Step 6 - Run the converter GUI (Component B)
 ```
 python converter_gui.py
 ```
-Upload `pod_mapping.xlsx`; dropdowns are filled from the labels in `Tables!A1:B1`; both directions work
-(reverse uses the inverted mappings).
+1. **Upload mapping Excel** -> choose `pod_mapping.xlsx` (dropdowns fill from `Tables!A1:B1`).
+2. Pick source and target pod.
+3. Paste SQL on the left (try `examples/test_input.sql`) -> **Convert**.
+4. Read the status area (counts, warnings, applied mappings). Edit the output if needed.
+5. **Copy Output** or **Save SQL**. **Clear** resets both boxes.
 
-## Build the .exe (Windows)
+Converting from Pod B to Pod A also works (inverse mappings).
+
+## Step 7 - Build the standalone .exe (Windows)
 ```
 build_exe.bat
 ```
-which runs: `pyinstaller --noconfirm --onefile --windowed --name SQLConverter --collect-all sqlglot converter_gui.py`
-Result: `dist\SQLConverter.exe` (no Python needed on the user machine; ship it with the mapping workbook).
+Runs: `pyinstaller --noconfirm --onefile --windowed --name SQLConverter --collect-all sqlglot converter_gui.py`
+Result: `dist\SQLConverter.exe`. Distribute it with `pod_mapping.xlsx`; no Python needed on the user machine.
+
+## Behaviour and limits
+- SQL is never executed.
+- Internally created tables (CREATE ... then used) are not treated as source tables and are not renamed.
+- Unqualified columns in multi-table queries are flagged, not guessed - qualify them with aliases.
+- Output is regenerated by SQLGlot: formatting is normalised, comments may move.
+- `JOIN ... USING` is flagged, not rewritten. `MERGE`/`UPDATE` use a simpler resolver.
+- Already-converted output is refused unless you confirm.
+- Target table without schema keeps the source schema (warning) unless the Schemas sheet maps it.
